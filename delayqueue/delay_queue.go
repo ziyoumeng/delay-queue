@@ -34,6 +34,7 @@ func Push(job Job) error {
 		log.Printf("添加job到job pool失败#job-%+v#%s", job, err.Error())
 		return err
 	}
+	// todo 失败了要删除job
 	err = pushToBucket(<-bucketNameChan, job.Delay, job.Id)
 	if err != nil {
 		log.Printf("添加job到bucket失败#job-%+v#%s", job, err.Error())
@@ -44,6 +45,7 @@ func Push(job Job) error {
 }
 
 // Pop 轮询获取Job
+// todo  每次只能取的一个job。如果ready job较多的时候会加大网络I/O的消耗;改为批量获取
 func Pop(topics []string) (*Job, error) {
 	jobId, err := blockPopFromReadyQueue(topics, config.Setting.QueueBlockTimeout)
 	if err != nil {
@@ -110,6 +112,8 @@ func generateBucketName() <-chan string {
 }
 
 // 初始化定时器
+
+//todo timer的每1秒扫描一次延时队列，准度不高；改为afterFunc方式，精确定时扫描
 func initTimers() {
 	timers = make([]*time.Ticker, config.Setting.BucketSize)
 	var bucketName string
@@ -130,6 +134,8 @@ func waitTicker(timer *time.Ticker, bucketName string) {
 }
 
 // 扫描bucket, 取出延迟时间小于当前时间的Job
+// todo 目前采用的是集中存储机制，在多实例部署时Timer程序可能会并发执行，导致job被重复放入ready queue。
+//  为了解决这个问题，使用redis的setnx命令实现了简单的分布式锁，以保证每个bucket每次只有一个timer thread来扫描。
 func tickHandler(t time.Time, bucketName string) {
 	for {
 		bucketItem, err := getFromBucket(bucketName)
@@ -169,7 +175,9 @@ func tickHandler(t time.Time, bucketName string) {
 			pushToBucket(<-bucketNameChan, job.Delay, bucketItem.jobId)
 			continue
 		}
-
+		//todo   如果pushToReadyQueue执行后,removeFromBucket还未执行时,业务调用了pop(pop会计算ttr重新将job放入bucket),bucket可能会丢失该job
+		//todo   两种方案，1、lua脚本将pushToReadyQueue和removeFromBucket原子化；2、独立一个bucket专存rrt的job
+		//   https://github.com/ouqiang/delay-queue/issues/19
 		err = pushToReadyQueue(job.Topic, bucketItem.jobId)
 		if err != nil {
 			log.Printf("JobId放入ready queue失败#bucket-%s#job-%+v#%s",
